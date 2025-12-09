@@ -168,7 +168,7 @@ def extract_table_from_pdf(pdf_file) -> List[List[str]]:
         pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
         
         # Configure model
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        model = genai.GenerativeModel('gemini-2.5-pro')
         
         # Create prompt
         prompt = """
