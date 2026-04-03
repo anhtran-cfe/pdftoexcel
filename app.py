@@ -4,7 +4,6 @@ import pandas as pd
 from io import BytesIO
 from google import genai
 from google.genai import types
-from google.oauth2 import service_account
 from typing import List, Dict, Any
 
 # Page configuration
@@ -152,41 +151,20 @@ def login_page():
 
 def get_genai_client() -> genai.Client:
     """
-    Create Google Gen AI client for Vertex AI using service account credentials
-    from Streamlit secrets.
+    Create Google Gen AI client for Vertex AI using API key (express mode).
+    Simplest authentication - just needs an API key from Google Cloud Console.
     """
     try:
-        # Read GCP config from secrets
-        gcp_project = st.secrets.get("GCP_PROJECT", "")
-        gcp_location = st.secrets.get("GCP_LOCATION", "us-central1")
+        api_key = st.secrets.get("VERTEX_AI_API_KEY", "")
 
-        if not gcp_project:
-            st.error("⚠️ Chưa cấu hình GCP_PROJECT. Vui lòng liên hệ quản trị viên.")
+        if not api_key:
+            st.error("⚠️ Chưa cấu hình VERTEX_AI_API_KEY. Vui lòng liên hệ quản trị viên.")
             return None
 
-        # Build credentials from service account JSON stored in secrets
-        sa_info = st.secrets.get("gcp_service_account", None)
-        if sa_info:
-            # Convert AttrDict to regular dict
-            sa_dict = dict(sa_info)
-            credentials = service_account.Credentials.from_service_account_info(
-                sa_dict,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            client = genai.Client(
-                vertexai=True,
-                project=gcp_project,
-                location=gcp_location,
-                credentials=credentials,
-            )
-        else:
-            # Fallback: use Application Default Credentials (ADC)
-            # Works when running on GCP or with `gcloud auth application-default login`
-            client = genai.Client(
-                vertexai=True,
-                project=gcp_project,
-                location=gcp_location,
-            )
+        client = genai.Client(
+            vertexai=True,
+            api_key=api_key,
+        )
 
         return client
 
@@ -228,7 +206,7 @@ def extract_table_from_pdf(pdf_file) -> List[List[str]]:
         CHỈ trả về JSON array, KHÔNG có text nào khác.
         """
 
-        # Create PDF part from bytes using the new Gen AI SDK
+        # Create PDF part from raw bytes (no base64 needed with new SDK)
         pdf_part = types.Part.from_bytes(
             data=pdf_data,
             mime_type="application/pdf",
@@ -304,7 +282,7 @@ def main_app():
                 del st.session_state['extracted_data']
             st.rerun()
 
-    # Validate client can be created (fail early)
+    # Validate client can be created
     client = get_genai_client()
     if client is None:
         st.stop()
