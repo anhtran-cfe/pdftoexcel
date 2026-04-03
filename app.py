@@ -1,9 +1,10 @@
 import streamlit as st
-import base64
 import json
 import pandas as pd
 from io import BytesIO
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+from google.oauth2 import service_account
 from typing import List, Dict, Any
 
 # Page configuration
@@ -94,6 +95,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 def verify_credentials(username: str, password: str) -> bool:
     """Verify username and password against secrets"""
     try:
@@ -105,19 +107,20 @@ def verify_credentials(username: str, password: str) -> bool:
         st.error(f"⚠️ Lỗi xác thực. Vui lòng liên hệ quản trị viên.")
         return False
 
+
 def login_page():
     """Display login page"""
     st.markdown("""
-        <div class='login-container'>
-            <div class='login-header'>
-                <div class='login-title'>🔐 Đăng nhập hệ thống</div>
-                <div class='login-subtitle'>Công cụ chuyển đổi PDF sang Excel</div>
-            </div>
+    <div class='login-container'>
+        <div class='login-header'>
+            <div class='login-title'>🔐 Đăng nhập hệ thống</div>
+            <div class='login-subtitle'>Công cụ chuyển đổi PDF sang Excel</div>
         </div>
+    </div>
     """, unsafe_allow_html=True)
-    
+
     col1, col2, col3 = st.columns([1, 2, 1])
-    
+
     with col2:
         st.markdown("### Thông tin đăng nhập")
         with st.form("login_form", clear_on_submit=False):
@@ -132,10 +135,9 @@ def login_page():
                 placeholder="Nhập mật khẩu",
                 key="password_input"
             )
-            
             st.markdown("<br>", unsafe_allow_html=True)
             submit = st.form_submit_button("🔓 Đăng nhập", use_container_width=True)
-            
+
             if submit:
                 if not username or not password:
                     st.warning("⚠️ Vui lòng nhập đầy đủ thông tin!")
@@ -147,113 +149,150 @@ def login_page():
                 else:
                     st.error("❌ Tên đăng nhập hoặc mật khẩu không đúng!")
 
-def configure_api() -> bool:
-    """Configure API with key from secrets"""
+
+def get_genai_client() -> genai.Client:
+    """
+    Create Google Gen AI client for Vertex AI using service account credentials
+    from Streamlit secrets.
+    """
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY", "")
-        if not api_key:
-            st.error("⚠️ Lỗi cấu hình hệ thống. Vui lòng liên hệ quản trị viên.")
-            return False
-        genai.configure(api_key=api_key)
-        return True
+        # Read GCP config from secrets
+        gcp_project = st.secrets.get("GCP_PROJECT", "")
+        gcp_location = st.secrets.get("GCP_LOCATION", "us-central1")
+
+        if not gcp_project:
+            st.error("⚠️ Chưa cấu hình GCP_PROJECT. Vui lòng liên hệ quản trị viên.")
+            return None
+
+        # Build credentials from service account JSON stored in secrets
+        sa_info = st.secrets.get("gcp_service_account", None)
+        if sa_info:
+            # Convert AttrDict to regular dict
+            sa_dict = dict(sa_info)
+            credentials = service_account.Credentials.from_service_account_info(
+                sa_dict,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            client = genai.Client(
+                vertexai=True,
+                project=gcp_project,
+                location=gcp_location,
+                credentials=credentials,
+            )
+        else:
+            # Fallback: use Application Default Credentials (ADC)
+            # Works when running on GCP or with `gcloud auth application-default login`
+            client = genai.Client(
+                vertexai=True,
+                project=gcp_project,
+                location=gcp_location,
+            )
+
+        return client
+
     except Exception as e:
-        st.error(f"⚠️ Không thể khởi tạo hệ thống. Vui lòng liên hệ quản trị viên.")
-        return False
+        st.error(f"⚠️ Không thể khởi tạo Vertex AI client. Vui lòng liên hệ quản trị viên.")
+        st.error(f"Chi tiết: {str(e)}")
+        return None
+
 
 def extract_table_from_pdf(pdf_file) -> List[List[str]]:
-    """Extract table data from PDF using AI"""
+    """Extract table data from PDF using Vertex AI Gemini"""
     try:
-        # Read PDF file
+        # Get client
+        client = get_genai_client()
+        if client is None:
+            return []
+
+        # Read PDF file as bytes
         pdf_data = pdf_file.read()
-        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
-        
-        # Configure model
-        model = genai.GenerativeModel('gemini-2.5-pro')
-        
+
         # Create prompt
         prompt = """
         Trích xuất TẤT CẢ các bảng từ tài liệu PDF này.
-        
+
         Yêu cầu:
         1. Tìm và trích xuất tất cả các bảng trong tài liệu
         2. Giữ nguyên cấu trúc bảng gốc
         3. Dòng đầu tiên là tiêu đề cột
         4. Giữ nguyên định dạng số và văn bản
         5. Nếu có nhiều bảng, gộp tất cả lại
-        
+
         Trả về JSON array với format:
         [
-          ["Cột 1", "Cột 2", "Cột 3"],
-          ["Giá trị 1", "Giá trị 2", "Giá trị 3"],
-          ...
+            ["Cột 1", "Cột 2", "Cột 3"],
+            ["Giá trị 1", "Giá trị 2", "Giá trị 3"],
+            ...
         ]
-        
+
         CHỈ trả về JSON array, KHÔNG có text nào khác.
         """
-        
-        # Generate content
-        response = model.generate_content([
-            prompt,
-            {
-                'mime_type': 'application/pdf',
-                'data': pdf_base64
-            }
-        ])
-        
+
+        # Create PDF part from bytes using the new Gen AI SDK
+        pdf_part = types.Part.from_bytes(
+            data=pdf_data,
+            mime_type="application/pdf",
+        )
+
+        # Generate content via Vertex AI
+        response = client.models.generate_content(
+            model="gemini-2.5-pro",
+            contents=[prompt, pdf_part],
+        )
+
         # Parse response
         response_text = response.text.strip()
-        
+
         # Remove markdown code blocks if present
         if response_text.startswith('```'):
             response_text = response_text.split('```')[1]
             if response_text.startswith('json'):
                 response_text = response_text[4:]
             response_text = response_text.strip()
-        
+
         # Parse JSON
         try:
             table_data = json.loads(response_text)
-            
             # Handle case where data is wrapped in another array
             if isinstance(table_data, list) and len(table_data) == 1 and isinstance(table_data[0], list):
                 table_data = table_data[0]
-            
             return table_data
-            
         except json.JSONDecodeError as e:
             st.error(f"⚠️ Lỗi xử lý dữ liệu: Không thể chuyển đổi phản hồi thành bảng")
             st.warning(f"Nội dung nhận được: {response_text[:200]}...")
             return []
-            
+
     except Exception as e:
         st.error(f"⚠️ Lỗi trong quá trình xử lý: {str(e)}")
         return []
+
 
 def convert_to_csv(data: List[List[str]]) -> BytesIO:
     """Convert table data to CSV with UTF-8 BOM for Excel compatibility"""
     if not data:
         return None
-    
+
     # Create DataFrame
     df = pd.DataFrame(data[1:], columns=data[0])
-    
+
     # Create CSV with UTF-8 BOM
     csv_buffer = BytesIO()
     # Add BOM for Excel to recognize UTF-8
     csv_buffer.write('\ufeff'.encode('utf-8'))
     df.to_csv(csv_buffer, index=False, encoding='utf-8')
     csv_buffer.seek(0)
-    
+
     return csv_buffer
+
 
 def main_app():
     """Main application interface"""
-    
     # Header with user info and logout
     col1, col2 = st.columns([3, 1])
     with col1:
         st.markdown('<h1 class="main-header">📄 Chuyển đổi PDF sang Excel</h1>', unsafe_allow_html=True)
-        st.markdown('<p class="sub-header">Trích xuất bảng dữ liệu từ file PDF tự động</p>', unsafe_allow_html=True)
+        st.markdown('<p class="sub-header">Trích xuất bảng dữ liệu từ file PDF tự động (Vertex AI)</p>', unsafe_allow_html=True)
+
     with col2:
         st.write("")
         st.write("")
@@ -264,11 +303,12 @@ def main_app():
             if 'extracted_data' in st.session_state:
                 del st.session_state['extracted_data']
             st.rerun()
-    
-    # Configure API
-    if not configure_api():
+
+    # Validate client can be created (fail early)
+    client = get_genai_client()
+    if client is None:
         st.stop()
-    
+
     # File upload section
     st.markdown("### 📤 Tải file PDF")
     uploaded_file = st.file_uploader(
@@ -276,11 +316,10 @@ def main_app():
         type=['pdf'],
         help="Chọn file PDF chứa bảng dữ liệu cần trích xuất"
     )
-    
+
     if uploaded_file is not None:
         # Display file info
         file_size = len(uploaded_file.getvalue()) / 1024 / 1024  # Convert to MB
-        
         col1, col2 = st.columns(2)
         with col1:
             st.markdown(f"""
@@ -289,12 +328,12 @@ def main_app():
                 <strong>📊 Kích thước:</strong> {file_size:.2f} MB
             </div>
             """, unsafe_allow_html=True)
-        
+
         # Extract button
         if st.button("🚀 Trích xuất dữ liệu", use_container_width=True):
-            with st.spinner("⏳ Đang xử lý file PDF... Vui lòng đợi trong giây lát."):
+            with st.spinner("⏳ Đang xử lý file PDF qua Vertex AI... Vui lòng đợi trong giây lát."):
                 extracted_data = extract_table_from_pdf(uploaded_file)
-                
+
                 if extracted_data and len(extracted_data) > 0:
                     st.session_state['extracted_data'] = extracted_data
                     st.markdown("""
@@ -304,19 +343,18 @@ def main_app():
                     """, unsafe_allow_html=True)
                 else:
                     st.error("❌ Không tìm thấy bảng dữ liệu trong file PDF. Vui lòng kiểm tra lại file.")
-    
+
     # Display extracted data
     if 'extracted_data' in st.session_state:
         data = st.session_state['extracted_data']
-        
         st.markdown("### 📊 Dữ liệu đã trích xuất")
-        
+
         # Create DataFrame for display
         df = pd.DataFrame(data[1:], columns=data[0])
-        
+
         # Display data
         st.dataframe(df, use_container_width=True, height=400)
-        
+
         # Statistics
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -325,11 +363,10 @@ def main_app():
             st.metric("📊 Số cột", len(df.columns))
         with col3:
             st.metric("💾 Dung lượng", f"{len(str(df)) / 1024:.1f} KB")
-        
+
         # Download button
         st.markdown("### 💾 Tải xuống")
         csv_data = convert_to_csv(data)
-        
         if csv_data:
             st.download_button(
                 label="📥 Tải xuống file Excel (CSV)",
@@ -338,8 +375,8 @@ def main_app():
                 mime="text/csv",
                 use_container_width=True
             )
-            
             st.info("ℹ️ **Lưu ý:** File được tải xuống có định dạng CSV, có thể mở trực tiếp bằng Microsoft Excel hoặc Google Sheets.")
+
 
 def main():
     """Main application entry point"""
@@ -347,6 +384,7 @@ def main():
         login_page()
     else:
         main_app()
+
 
 if __name__ == "__main__":
     main()
